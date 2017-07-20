@@ -193,12 +193,6 @@ impl Client {
         end_coord: Coord,
         time_constraint: T,
     ) -> Box<Future<Item = i32, Error = errors::Error>> {
-        let mut req_url = self.base_url.clone();
-        {
-            let mut path_segments = req_url.path_segments_mut().unwrap();
-            path_segments.push("traveltime");
-            path_segments.push("");
-        }
         let mut params: Vec<(String, String)> =
             vec![
                 (
@@ -216,164 +210,121 @@ impl Client {
                 TimeType::Arrival => params.push(("time_type".to_string(), "arrival".to_string())),
             }
         };
+        let request = self.build_request("traveltime", params, None);
+        self.make_request(request, |body| {
+            let result: TimeTravelledResponse = serde_json::from_slice(&body)?;
+            Ok(result.travel_time_minutes)
+        })
+    }
+
+    /// Check whether a single (latitude, longitude) pair is covered by citymapper
+    ///
+    /// #Arguments
+    ///
+    /// * coord - The (latitiude, longitude) pair to check for coverage
+    pub fn single_point_coverage(
+        &self,
+        point: Coord,
+    ) -> Box<Future<Item = PointCoverage, Error = errors::Error>> {
+        let params = vec![("coord".to_string(), format!("{0},{1}", point.0, point.1))];
+        let request = self.build_request("singlepointcoverage", params, None);
+        self.make_request(request, |body| {
+            let result: PointCoverageResponse = serde_json::from_slice(&body)?;
+            if result.points.len() != 1 {
+                return Err(errors::ErrorKind::BadResponse.into());
+            }
+            Ok(result.points[0].clone())
+        })
+    }
+
+    /// Check whether multiple (latitude, longitude) pairs are covered by citymapper
+    ///
+    /// #Arguments
+    /// * points - A set of `MultiPointCoverageQuery` to check for coverage
+    pub fn coverage(
+        &self,
+        points: Vec<MultiPointCoverageQuery>,
+    ) -> Box<Future<Item = Vec<PointCoverage>, Error = errors::Error>> {
+        let req_body = serde_json::to_string(&MultiPointCoverageRequestBody { points: points })
+            .unwrap();
+        let request = self.build_request("coverage", Vec::new(), req_body);
+        self.make_request(request, |body| {
+            let result: PointCoverageResponse = serde_json::from_slice(&body)?;
+            Ok(result.points)
+        })
+    }
+
+    fn build_request<T: Into<Option<String>>>(
+        &self,
+        path: &str,
+        params: Vec<(String, String)>,
+        body: T,
+    ) -> Request {
+        let body = body.into();
+        let mut req_url = self.base_url.clone();
+        {
+            let mut path_segments = req_url.path_segments_mut().unwrap();
+            path_segments.push(path);
+            path_segments.push("");
+        }
         for (param, value) in params {
             req_url.query_pairs_mut().append_pair(&param, &value);
         }
         req_url.query_pairs_mut().append_pair("key", &self.api_key);
         let req_uri: hyper::Uri = req_url.clone().into_string().parse().unwrap();
-        info!(self.logger, "Making citymapper request to {0}", req_uri);
-        let mut request = Request::new(Method::Get, req_uri);
-        request.headers_mut().set(ContentType::json());
-        request.headers_mut().set(ContentLength(0));
+        let redacted_url = self.redacted_url(req_url);
+        info!(
+            self.logger,
+            "Making citymapper request to {0}",
+            redacted_url
+        );
 
-        let response = match req_url.scheme() {
-            "http" => self.make_http_request(request),
-            "https" => self.make_https_request(request),
-            _ => panic!("Unknown scheme in base URL"),
+        let method = if body.is_some() {
+            Method::Post
+        } else {
+            Method::Get
         };
+        let mut request = Request::new(method, req_uri);
+        request.headers_mut().set(ContentType::json());
 
-        let err_logger = self.logger.clone();
-        let future_logger = self.logger.clone();
-        let future = response
-            .map_err(move |e| -> errors::Error {
-                error!(err_logger, "Error fetching from citymapper servers: {0}", e);
-                e.into()
-            })
-            .and_then(move |response| {
-                debug!(future_logger, "{0} received", response.status());
-                let status = response.status().clone();
-                response
-                    .body()
-                    .concat2()
-                    .map_err(|e| -> errors::Error { e.into() })
-                    .and_then(move |body: Chunk| {
-                        match status {
-                            StatusCode::BadRequest => {}
-                            StatusCode::Ok => {}
-                            _ => return Err(errors::ErrorKind::BadResponse.into()),
-                        };
-                        debug!(
-                            future_logger,
-                            "Response content: {:?}",
-                            std::str::from_utf8(&body).unwrap_or("Invalid UTF8 content")
-                        );
-                        if status == StatusCode::BadRequest {
-                            let error_report: BadRequestResponse = serde_json::from_slice(&body)?;
-                            let e = Err(
-                                errors::ErrorKind::BadRequestError(error_report.error_message)
-                                    .into(),
-                            );
-                            return e;
-                        }
-                        let result: TimeTravelledResponse = serde_json::from_slice(&body)?;
-                        Ok(result.travel_time_minutes)
-                    })
-            });
-        Box::new(future)
+        if let Some(body) = body {
+            debug!(self.logger, "Request body is {0}", body);
+            request.headers_mut().set(ContentLength(body.len() as u64));
+            request.set_body(body);
+        } else {
+            request.headers_mut().set(ContentLength(0));
+        }
+        request
     }
 
-    /// Check whether a single (latitude, longitude) pair is covered by citymapper
-    pub fn single_point_coverage(
-        &self,
-        point: Coord,
-    ) -> Box<Future<Item = PointCoverage, Error = errors::Error>> {
-        let mut req_url = self.base_url.clone();
-        {
-            let mut path_segments = req_url.path_segments_mut().unwrap();
-            path_segments.push("singlepointcoverage");
-            path_segments.push("");
+    fn redacted_url(&self, url: url::Url) -> url::Url {
+        let mut redacted_params: Vec<(String, String)> = Vec::new();
+        for (param, value) in url.query_pairs() {
+            if param == "key" {
+                redacted_params.push(("key".to_string(), "redacted".to_string()));
+            } else {
+                redacted_params.push((param.to_string(), value.to_string()));
+            }
         }
-        req_url.query_pairs_mut().append_pair(
-            "coord",
-            &format!(
-                "{0},{1}",
-                point.0,
-                point.1
-            ),
-        );
-        req_url.query_pairs_mut().append_pair("key", &self.api_key);
-        let req_uri: hyper::Uri = req_url.clone().into_string().parse().unwrap();
-        info!(self.logger, "Making citymapper request to {0}", req_uri);
-        let mut request = Request::new(Method::Get, req_uri);
-        request.headers_mut().set(ContentType::json());
-        request.headers_mut().set(ContentLength(0));
-
-        let response = match req_url.scheme() {
-            "http" => self.make_http_request(request),
-            "https" => self.make_https_request(request),
-            _ => panic!("Unknown scheme in base URL"),
-        };
-
-        let err_logger = self.logger.clone();
-        let future_logger = self.logger.clone();
-        let future = response
-            .map_err(move |e| -> errors::Error {
-                error!(err_logger, "Error fetching from citymapper servers: {0}", e);
-                e.into()
-            })
-            .and_then(move |response| {
-                debug!(future_logger, "{0} received", response.status());
-                let status = response.status().clone();
-                response
-                    .body()
-                    .concat2()
-                    .map_err(|e| -> errors::Error { e.into() })
-                    .and_then(move |body: Chunk| {
-                        match status {
-                            StatusCode::BadRequest => {}
-                            StatusCode::Ok => {}
-                            _ => return Err(errors::ErrorKind::BadResponse.into()),
-                        };
-                        debug!(
-                            future_logger,
-                            "Response content: {:?}",
-                            std::str::from_utf8(&body).unwrap_or("Invalid UTF8 content")
-                        );
-                        if status == StatusCode::BadRequest {
-                            let error_report: BadRequestResponse = serde_json::from_slice(&body)?;
-                            let e = Err(
-                                errors::ErrorKind::BadRequestError(error_report.error_message)
-                                    .into(),
-                            );
-                            return e;
-                        }
-                        let result: PointCoverageResponse = serde_json::from_slice(&body)?;
-                        if result.points.len() != 1 {
-                            return Err(errors::ErrorKind::BadResponse.into());
-                        }
-                        Ok(result.points[0].clone())
-                    })
-            });
-        Box::new(future)
+        let mut result = url.clone();
+        result.query_pairs_mut().clear();
+        for (param, value) in redacted_params {
+            result.query_pairs_mut().append_pair(&param, &value);
+        }
+        result
     }
 
-    /// Check whether multiple (latitude, longitude) pairs are covered by citymapper
-    pub fn coverage(
+    fn make_request<T: 'static, F: 'static>(
         &self,
-        points: Vec<MultiPointCoverageQuery>,
-    ) -> Box<Future<Item = Vec<PointCoverage>, Error = errors::Error>> {
-        let mut req_url = self.base_url.clone();
-        {
-            let mut path_segments = req_url.path_segments_mut().unwrap();
-            path_segments.push("coverage");
-            path_segments.push("");
-        }
-        req_url.query_pairs_mut().append_pair("key", &self.api_key);
-        let req_uri: hyper::Uri = req_url.clone().into_string().parse().unwrap();
-        info!(self.logger, "Making citymapper request to {0}", req_uri);
-        let req_body = serde_json::to_string(&MultiPointCoverageRequestBody { points: points })
-            .unwrap();
-        let mut request = Request::new(Method::Post, req_uri);
-        request.headers_mut().set(ContentType::json());
-        request.headers_mut().set(
-            ContentLength(req_body.len() as u64),
-        );
-        debug!(self.logger, "Request body is {0}", req_body);
-        request.set_body(req_body);
-
-        let response = match req_url.scheme() {
-            "http" => self.make_http_request(request),
-            "https" => self.make_https_request(request),
+        request: Request,
+        response_handler: F,
+    ) -> Box<Future<Item = T, Error = errors::Error>>
+    where
+        F: Fn(Chunk) -> Result<T, errors::Error>,
+    {
+        let response = match request.uri().scheme() {
+            Some("http") => self.make_http_request(request),
+            Some("https") => self.make_https_request(request),
             _ => panic!("Unknown scheme in base URL"),
         };
 
@@ -410,8 +361,7 @@ impl Client {
                             );
                             return e;
                         }
-                        let result: PointCoverageResponse = serde_json::from_slice(&body)?;
-                        Ok(result.points)
+                        Ok(response_handler(body)?)
                     })
             });
         Box::new(future)

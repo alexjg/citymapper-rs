@@ -1,7 +1,11 @@
 [package]
 name = "citymapper"
+description = "A futures aware wrapper around the CityMapper API"
+repository = "https://github.com/alexjg/citymapper-rs"
+license = "MIT/Apache-2.0"
 version = "0.1.0"
-authors = ["alex"]
+authors = ["Alex Good"]
+readme = "README.md"
 
 [dependencies]
 chrono = "0.4"

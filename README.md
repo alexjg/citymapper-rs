@@ -1,4 +1,4 @@
-# citymapper-rs [![Build Status](https://travis-ci.org/alexjg/citymapper-rs.svg?branch=master)](https://travis-ci.org/alexjg/citymapper-rs) [![Crates.io](https://img.shields.io/crates/v/citymapper-rs.svg)](https://crates.io/crates/citymapper) [![Docs](https://docs.rs/citymapper/badge.svg)](https://docs.rs/citymapper-rs/0.1.0/citymapper-rs/)
+# citymapper-rs [![Build Status](https://travis-ci.org/alexjg/citymapper-rs.svg?branch=master)](https://travis-ci.org/alexjg/citymapper-rs) [![Crates.io](https://img.shields.io/crates/v/citymapper.svg)](https://crates.io/crates/citymapper) [![Docs](https://docs.rs/citymapper/badge.svg)](https://docs.rs/citymapper/0.1.0/citymapper/)
 
 This is a tiny library wrapping the citymapper API in a futures aware interface.
 

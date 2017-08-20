@@ -1,3 +1,33 @@
+//! A library for using the CityMapper API
+//!
+//! This library wraps the citymapper in a futures aware rust interface
+//!
+//! E.g
+//!
+//! ```rust,no_run
+//! extern crate chrono;
+//! extern crate tokio_core;
+//! extern crate citymapper;
+//! use tokio_core::reactor::Core;
+//!
+//! fn main() {
+//!     let api_key = "<your api key>".to_string();
+//!     let start_coord = (51.525246, 0.084672);
+//!     let end_coord = (51.559098, 0.074503);
+//!     let mut core = Core::new().unwrap();
+//!     let handle = core.handle();
+//!     let client = citymapper::ClientBuilder::new(&handle, api_key).build();
+//!     let time_info = citymapper::TimeConstraint::arrival_by(
+//!         chrono::Utc::now() + chrono::Duration::seconds(1800),
+//!     );
+//!     let response_future = client.travel_time(start_coord, end_coord, time_info);
+//!     let response = core.run(response_future).unwrap();
+//!     println!("Response: {:?}", response);
+//! }
+//! ```
+//!
+//! As you can see you first need to instantiate a `ClientBuilder` and use
+//! that to create an instance of `Client`.
 extern crate chrono;
 extern crate tokio_core;
 extern crate hyper;
@@ -24,7 +54,7 @@ use tokio_core::reactor::Handle;
 
 /// How the CityMapper API should treat the `time` argument. Currently the
 /// only option the API provides is `Arrival`.
-pub enum TimeType {
+enum TimeType {
     Arrival,
 }
 
@@ -42,8 +72,6 @@ impl TimeConstraint {
     /// # Arguments
     ///
     /// * `time` - The time to calculate the travel time with respect to
-    /// * `time_type` - How the CityMapper API should treat the time argument,
-    /// currently the only option is `Arrival`
     pub fn arrival_by(time: chrono::DateTime<chrono::Utc>) -> TimeConstraint {
         return TimeConstraint {
             time: time,
@@ -55,6 +83,7 @@ impl TimeConstraint {
 /// A WGS84 coordinate in the form (latitude, longitude)
 type Coord = (f64, f64);
 
+/// Interface to the CityMapper API
 pub struct Client {
     handle: Box<Handle>,
     api_key: String,
@@ -134,15 +163,19 @@ struct TimeTravelledResponse {
 }
 
 
+/// One point in a response from the coverage API (either single or multi point)
 #[derive(Deserialize, Debug, Clone)]
 pub struct PointCoverage {
+    /// Whether or not the API covers this point
     pub covered: bool,
+    /// The coordinate that was passed to the API
     pub coord: (f64, f64),
+    /// The ID that was passed to the API, if any. See the `MultiPointCoverageQuery` struct.
     pub id: Option<String>,
 }
 
 #[derive(Deserialize)]
-pub struct PointCoverageResponse {
+struct PointCoverageResponse {
     points: Vec<PointCoverage>,
 }
 
@@ -151,6 +184,7 @@ struct BadRequestResponse {
     error_message: String,
 }
 
+/// An individual point to send to the multi point coverage query API
 #[derive(Serialize)]
 pub struct MultiPointCoverageQuery {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -164,6 +198,15 @@ struct MultiPointCoverageRequestBody {
 }
 
 impl MultiPointCoverageQuery {
+    /// Create a new point to query against. The `id` argument can be `None`
+    /// but if it is a string it will be passed to the API and returned in the
+    /// response, see the citymapper API docs for more details.
+    ///
+    /// ```rust
+    /// # use citymapper::MultiPointCoverageQuery;
+    /// let point_without_id = MultiPointCoverageQuery::new((0.12, 3.45), None);
+    /// let point_with_id = MultiPointCoverageQuery::new((0.12, 3.45), "someid".to_string());
+    /// ```
     pub fn new<T: Into<Option<String>>>(coord: Coord, id: T) -> MultiPointCoverageQuery {
         MultiPointCoverageQuery {
             id: id.into(),
@@ -176,7 +219,7 @@ impl MultiPointCoverageQuery {
 /// The main interface for making calls to CityMapper
 impl Client {
     /// Returns a future containing the travel time from start coord to end coord as per the
-    /// citymapper api documented at [https://citymapper.3scale.net/docs]
+    /// citymapper api documented at https://citymapper.3scale.net/docs
     ///
     /// # Arguments
     ///
@@ -187,6 +230,30 @@ impl Client {
     ///
     /// # Returns
     /// A future which will resolve to the number of minutes to travel.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # extern crate chrono;
+    /// # extern crate tokio_core;
+    /// # extern crate citymapper;
+    /// # use tokio_core::reactor::Core;
+    ///
+    /// # fn main() {
+    /// # let core = Core::new().unwrap();
+    /// # let handle = core.handle();
+    /// # let api_key = "some api key".to_string();
+    /// # let client = citymapper::ClientBuilder::new(&handle, api_key).build();
+    /// let start_coord = (51.525246, 0.084672);
+    /// let end_coord = (51.559098, 0.074503);
+    /// let response_without_time_constraint = client.travel_time(start_coord, end_coord, None);
+    ///
+    /// let time_info = citymapper::TimeConstraint::arrival_by(
+    ///     chrono::Utc::now() + chrono::Duration::seconds(1800),
+    /// );
+    /// let response_with_time_constraint = client.travel_time(start_coord, end_coord, time_info);
+    /// # }
+    /// ```
     pub fn travel_time<T: Into<Option<TimeConstraint>>>(
         &self,
         start_coord: Coord,
@@ -219,9 +286,30 @@ impl Client {
 
     /// Check whether a single (latitude, longitude) pair is covered by citymapper
     ///
-    /// #Arguments
+    /// # Arguments
     ///
     /// * coord - The (latitiude, longitude) pair to check for coverage
+    ///
+    /// # Returns
+    ///
+    /// A future which resolves to a `PointCoverage` struct.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # extern crate tokio_core;
+    /// # extern crate citymapper;
+    /// # use tokio_core::reactor::Core;
+    ///
+    /// # fn main() {
+    /// # let core = Core::new().unwrap();
+    /// # let handle = core.handle();
+    /// # let api_key = "some api key".to_string();
+    /// # let client = citymapper::ClientBuilder::new(&handle, api_key).build();
+    /// let coord = (51.525246, 0.084672);
+    ///
+    /// let response = client.single_point_coverage(coord);
+    /// # }
+    /// ```
     pub fn single_point_coverage(
         &self,
         point: Coord,
@@ -239,8 +327,33 @@ impl Client {
 
     /// Check whether multiple (latitude, longitude) pairs are covered by citymapper
     ///
-    /// #Arguments
+    /// # Arguments
     /// * points - A set of `MultiPointCoverageQuery` to check for coverage
+    ///
+    /// # Returns
+    ///
+    /// A future which resolves to a `Vec<PointCoverage>`
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # extern crate tokio_core;
+    /// # extern crate citymapper;
+    /// # use tokio_core::reactor::Core;
+    /// # use citymapper::MultiPointCoverageQuery;
+    ///
+    /// # fn main() {
+    /// # let core = Core::new().unwrap();
+    /// # let handle = core.handle();
+    /// # let api_key = "some api key".to_string();
+    /// # let client = citymapper::ClientBuilder::new(&handle, api_key).build();
+    /// let coord = (51.525246, 0.084672);
+    /// let point1 = MultiPointCoverageQuery::new(coord, "someid".to_string());
+    /// let coord2 = (52.345, 0.0745);
+    /// let point2 = MultiPointCoverageQuery::new(coord2, None);
+    ///
+    /// let response = client.coverage(vec![point1, point2]);
+    /// # }
+    /// ```
     pub fn coverage(
         &self,
         points: Vec<MultiPointCoverageQuery>,
